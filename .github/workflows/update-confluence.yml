@@ -10,7 +10,7 @@ name: Update Confluence on README Change
   jobs:
     update-confluence:
       runs-on: ubuntu-latest
-  
+
       steps:
         - name: Checkout repository
           uses: actions/checkout@v4
@@ -35,7 +35,7 @@ name: Update Confluence on README Change
             import os
             import markdown
             from atlassian import Confluence
-  
+
             confluence = Confluence(
                 url=os.environ['CONFLUENCE_BASE_URL'],
                 username=os.environ['CONFLUENCE_EMAIL'],
@@ -46,23 +46,20 @@ name: Update Confluence on README Change
             with open('README.md', 'r', encoding='utf-8') as f:
                 md_content = f.read()
 
-            # README 첫 번째 H1을 페이지 제목으로 사용
             title = 'README'
             for line in md_content.splitlines():
                 if line.startswith('# '):
                     title = line[2:].strip()
                     break
-
-            # Markdown -> HTML (Confluence storage format)
+  
             html_content = markdown.markdown(
                 md_content,
                 extensions=['tables', 'fenced_code', 'toc']
             )
-  
+
             space = os.environ['CONFLUENCE_SPACE']
             parent_id = os.environ.get('CONFLUENCE_PARENT_ID') or None
 
-            # 기존 페이지 존재 여부 확인
             page = confluence.get_page_by_title(space=space, title=title)
 
             if page:
