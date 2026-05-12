@@ -1,0 +1,100 @@
+name: Fetch Confluence Page
+
+on:
+  workflow_dispatch:
+    inputs:
+      page_id:
+        description: 'Confluence page ID'
+        required: true
+      format:
+        description: 'Output format (markdown|text|storage)'
+        required: false
+        default: 'markdown'
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install atlassian-python-api markdownify beautifulsoup4
+
+      - name: Fetch
+        env:
+          CONFLUENCE_BASE_URL: ${{ secrets.CONFLUENCE_BASE_URL }}
+          CONFLUENCE_EMAIL: ${{ secrets.CONFLUENCE_EMAIL }}
+          CONFLUENCE_API_TOKEN: ${{ secrets.CONFLUENCE_API_TOKEN }}
+          PAGE_ID: ${{ inputs.page_id }}
+          FORMAT: ${{ inputs.format }}
+        run: |
+          python - <<'EOF'
+          import os
+          import sys
+          from atlassian import Confluence
+          from bs4 import BeautifulSoup
+          from markdownify import markdownify as md
+
+          base = os.environ['CONFLUENCE_BASE_URL'].rstrip('/')
+          confluence = Confluence(
+              url=base,
+              username=os.environ['CONFLUENCE_EMAIL'],
+              password=os.environ['CONFLUENCE_API_TOKEN'],
+              cloud=True
+          )
+
+          page_id = os.environ['PAGE_ID']
+          fmt = os.environ.get('FORMAT', 'markdown').lower()
+
+          try:
+              page = confluence.get_page_by_id(
+                  page_id,
+                  expand='body.view,body.storage,version,space,ancestors'
+              )
+          except Exception as e:
+              print(f"ERROR fetching page {page_id}: {e}", file=sys.stderr)
+              sys.exit(1)
+
+          title = page.get('title', '')
+          space = (page.get('space') or {}).get('key', '')
+          version = (page.get('version') or {}).get('number', '')
+          when = (page.get('version') or {}).get('when', '')
+          author = ((page.get('version') or {}).get('by') or {}).get('displayName', '')
+          ancestors = [a.get('title', '') for a in (page.get('ancestors') or [])]
+
+          print("=" * 70)
+          print(f"TITLE: {title}")
+          print(f"SPACE: {space}")
+          print(f"PAGE ID: {page_id}")
+          print(f"URL: {base}/wiki/spaces/{space}/pages/{page_id}")
+          print(f"VERSION: {version} (updated {when} by {author})")
+          if ancestors:
+              print(f"PATH: {' > '.join(ancestors)} > {title}")
+          print("=" * 70)
+          print()
+
+          view_html = ((page.get('body') or {}).get('view') or {}).get('value', '')
+          storage_html = ((page.get('body') or {}).get('storage') or {}).get('value', '')
+
+          if fmt == 'storage':
+              print(storage_html)
+          elif fmt == 'text':
+              soup = BeautifulSoup(view_html, 'html.parser')
+              print(soup.get_text(separator='\n', strip=True))
+          else:
+              # markdown (default)
+              text = md(view_html, heading_style='ATX', bullets='-')
+              # collapse excessive blank lines
+              lines = []
+              prev_blank = False
+              for line in text.splitlines():
+                  is_blank = not line.strip()
+                  if is_blank and prev_blank:
+                      continue
+                  lines.append(line)
+                  prev_blank = is_blank
+              print('\n'.join(lines))
+          EOF
