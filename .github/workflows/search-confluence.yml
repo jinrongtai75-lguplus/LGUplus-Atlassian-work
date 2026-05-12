@@ -1,0 +1,92 @@
+name: Search Confluence
+
+on:
+  workflow_dispatch:
+    inputs:
+      space:
+        description: 'Space key (e.g. M2M, DEV)'
+        required: true
+        default: 'M2M'
+      query:
+        description: 'Search keyword'
+        required: true
+        default: '주간업무'
+      limit:
+        description: 'Max results per search type'
+        required: false
+        default: '15'
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install atlassian-python-api
+
+      - name: Search
+        env:
+          CONFLUENCE_BASE_URL: ${{ secrets.CONFLUENCE_BASE_URL }}
+          CONFLUENCE_EMAIL: ${{ secrets.CONFLUENCE_EMAIL }}
+          CONFLUENCE_API_TOKEN: ${{ secrets.CONFLUENCE_API_TOKEN }}
+          SPACE: ${{ inputs.space }}
+          QUERY: ${{ inputs.query }}
+          LIMIT: ${{ inputs.limit }}
+        run: |
+          python - <<'EOF'
+          import os
+          from atlassian import Confluence
+
+          base = os.environ['CONFLUENCE_BASE_URL'].rstrip('/')
+          confluence = Confluence(
+              url=base,
+              username=os.environ['CONFLUENCE_EMAIL'],
+              password=os.environ['CONFLUENCE_API_TOKEN'],
+              cloud=True
+          )
+
+          space = os.environ['SPACE']
+          query = os.environ['QUERY']
+          limit = int(os.environ['LIMIT'])
+
+          def print_hits(label, cql):
+              print(f"\n{'='*70}")
+              print(f"{label}")
+              print(f"CQL: {cql}")
+              print('='*70)
+              try:
+                  result = confluence.cql(cql, limit=limit, expand='content.version')
+                  hits = result.get('results') or []
+                  if not hits:
+                      print("  (no results)")
+                      return
+                  for r in hits:
+                      c = r.get('content') or r
+                      when = r.get('friendlyLastModified') or (c.get('version') or {}).get('when') or ''
+                      title = c.get('title', '')
+                      page_id = c.get('id', '')
+                      excerpt = (r.get('excerpt') or '').replace('\n', ' ').strip()[:240]
+                      print(f"\n  • [{when}] {title}")
+                      print(f"    {base}/wiki/spaces/{space}/pages/{page_id}")
+                      if excerpt:
+                          print(f"    > {excerpt}")
+              except Exception as e:
+                  print(f"  ERROR: {e}")
+
+          print_hits(
+              f"TITLE MATCH — space={space}, title~'{query}'",
+              f'space = "{space}" AND title ~ "{query}" AND type = "page" ORDER BY lastModified DESC'
+          )
+          print_hits(
+              f"TEXT MATCH (body) — space={space}, text~'{query}'",
+              f'space = "{space}" AND text ~ "{query}" AND type = "page" ORDER BY lastModified DESC'
+          )
+          print_hits(
+              f"RECENT — space={space}, recently modified (top {limit})",
+              f'space = "{space}" AND type = "page" ORDER BY lastModified DESC'
+          )
+          EOF
