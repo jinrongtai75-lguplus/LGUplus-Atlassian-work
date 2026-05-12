@@ -4,12 +4,16 @@ on:
   workflow_dispatch:
     inputs:
       page_id:
-        description: 'Confluence page ID'
+        description: 'Confluence page ID (numeric)'
         required: true
       format:
-        description: 'Output format (markdown|text|storage)'
+        description: 'Body format (markdown|text|storage|none)'
         required: false
         default: 'markdown'
+      include:
+        description: 'Extra info: comma list of body,attachments,comments,children,labels,all'
+        required: false
+        default: 'body'
 
 jobs:
   fetch:
@@ -30,6 +34,7 @@ jobs:
           CONFLUENCE_API_TOKEN: ${{ secrets.CONFLUENCE_API_TOKEN }}
           PAGE_ID: ${{ inputs.page_id }}
           FORMAT: ${{ inputs.format }}
+          INCLUDE: ${{ inputs.include }}
         run: |
           python - <<'EOF'
           import os
@@ -46,13 +51,24 @@ jobs:
               cloud=True
           )
 
-          page_id = os.environ['PAGE_ID']
+          page_id = os.environ['PAGE_ID'].strip()
           fmt = os.environ.get('FORMAT', 'markdown').lower()
+          include_raw = os.environ.get('INCLUDE', 'body').lower()
+          include = {s.strip() for s in include_raw.split(',') if s.strip()}
+          if 'all' in include:
+              include = {'body', 'attachments', 'comments', 'children', 'labels'}
 
+          def section(title):
+              print()
+              print('=' * 70)
+              print(title)
+              print('=' * 70)
+
+          # ---------- META ----------
           try:
               page = confluence.get_page_by_id(
                   page_id,
-                  expand='body.view,body.storage,version,space,ancestors'
+                  expand='body.view,body.storage,version,space,ancestors,metadata.labels'
               )
           except Exception as e:
               print(f"ERROR fetching page {page_id}: {e}", file=sys.stderr)
@@ -64,37 +80,119 @@ jobs:
           when = (page.get('version') or {}).get('when', '')
           author = ((page.get('version') or {}).get('by') or {}).get('displayName', '')
           ancestors = [a.get('title', '') for a in (page.get('ancestors') or [])]
+          url = f"{base}/wiki/spaces/{space}/pages/{page_id}"
 
-          print("=" * 70)
+          section('META')
           print(f"TITLE: {title}")
           print(f"SPACE: {space}")
           print(f"PAGE ID: {page_id}")
-          print(f"URL: {base}/wiki/spaces/{space}/pages/{page_id}")
+          print(f"URL: {url}")
           print(f"VERSION: {version} (updated {when} by {author})")
           if ancestors:
               print(f"PATH: {' > '.join(ancestors)} > {title}")
-          print("=" * 70)
-          print()
 
-          view_html = ((page.get('body') or {}).get('view') or {}).get('value', '')
-          storage_html = ((page.get('body') or {}).get('storage') or {}).get('value', '')
+          # ---------- BODY ----------
+          if 'body' in include and fmt != 'none':
+              section(f'BODY ({fmt})')
+              view_html = ((page.get('body') or {}).get('view') or {}).get('value', '')
+              storage_html = ((page.get('body') or {}).get('storage') or {}).get('value', '')
 
-          if fmt == 'storage':
-              print(storage_html)
-          elif fmt == 'text':
-              soup = BeautifulSoup(view_html, 'html.parser')
-              print(soup.get_text(separator='\n', strip=True))
-          else:
-              # markdown (default)
-              text = md(view_html, heading_style='ATX', bullets='-')
-              # collapse excessive blank lines
-              lines = []
-              prev_blank = False
-              for line in text.splitlines():
-                  is_blank = not line.strip()
-                  if is_blank and prev_blank:
-                      continue
-                  lines.append(line)
-                  prev_blank = is_blank
-              print('\n'.join(lines))
+              if fmt == 'storage':
+                  print(storage_html)
+              elif fmt == 'text':
+                  soup = BeautifulSoup(view_html, 'html.parser')
+                  print(soup.get_text(separator='\n', strip=True))
+              else:
+                  text = md(view_html, heading_style='ATX', bullets='-')
+                  lines = []
+                  prev_blank = False
+                  for line in text.splitlines():
+                      is_blank = not line.strip()
+                      if is_blank and prev_blank:
+                          continue
+                      lines.append(line)
+                      prev_blank = is_blank
+                  print('\n'.join(lines))
+
+          # ---------- LABELS ----------
+          if 'labels' in include:
+              section('LABELS')
+              try:
+                  labels = ((page.get('metadata') or {}).get('labels') or {}).get('results') or []
+                  if not labels:
+                      print('(no labels)')
+                  else:
+                      for lab in labels:
+                          print(f"  - {lab.get('name', '')}")
+              except Exception as e:
+                  print(f'ERROR: {e}')
+
+          # ---------- ATTACHMENTS ----------
+          if 'attachments' in include:
+              section('ATTACHMENTS')
+              try:
+                  atts = confluence.get_attachments_from_content(page_id, limit=200).get('results') or []
+                  if not atts:
+                      print('(no attachments)')
+                  else:
+                      for a in atts:
+                          a_title = a.get('title', '')
+                          a_id = a.get('id', '')
+                          ext = (a.get('extensions') or {})
+                          mime = ext.get('mediaType', '')
+                          size = ext.get('fileSize', '')
+                          download = (a.get('_links') or {}).get('download', '')
+                          dl_url = base + '/wiki' + download if download else ''
+                          print(f"  - {a_title}  [{mime}, {size} bytes]")
+                          print(f"    id={a_id}")
+                          if dl_url:
+                              print(f"    download: {dl_url}")
+              except Exception as e:
+                  print(f'ERROR: {e}')
+
+          # ---------- COMMENTS ----------
+          if 'comments' in include:
+              section('COMMENTS')
+              try:
+                  comments = confluence.get_page_comments(page_id, expand='body.view,version', depth='all').get('results') or []
+                  if not comments:
+                      print('(no comments)')
+                  else:
+                      for c in comments:
+                          c_author = ((c.get('version') or {}).get('by') or {}).get('displayName', '')
+                          c_when = (c.get('version') or {}).get('when', '')
+                          c_html = ((c.get('body') or {}).get('view') or {}).get('value', '')
+                          c_text = BeautifulSoup(c_html, 'html.parser').get_text(separator=' ', strip=True)
+                          print(f"  • [{c_when}] {c_author}")
+                          print(f"    {c_text}")
+                          print()
+              except Exception as e:
+                  print(f'ERROR: {e}')
+
+          # ---------- CHILDREN ----------
+          if 'children' in include:
+              section('CHILD PAGES')
+              try:
+                  start = 0
+                  total_listed = 0
+                  while True:
+                      children = confluence.get_page_child_by_type(page_id, type='page', start=start, limit=100, expand='version')
+                      if not children:
+                          break
+                      for c in children:
+                          c_title = c.get('title', '')
+                          c_id = c.get('id', '')
+                          c_when = (c.get('version') or {}).get('when', '')
+                          print(f"  - {c_title}")
+                          print(f"    id={c_id}  updated={c_when}")
+                          print(f"    {base}/wiki/spaces/{space}/pages/{c_id}")
+                          total_listed += 1
+                      if len(children) < 100:
+                          break
+                      start += 100
+                  if total_listed == 0:
+                      print('(no children)')
+              except Exception as e:
+                  print(f'ERROR: {e}')
+
           EOF
