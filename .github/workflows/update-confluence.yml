@@ -62,21 +62,37 @@ jobs:
           space = os.environ['CONFLUENCE_SPACE']
           parent_id = os.environ.get('CONFLUENCE_PARENT_ID') or None
 
-          # 기존 페이지 존재 여부 확인
-          page = confluence.get_page_by_title(space=space, title=title)
+          # CQL로 명시적으로 지정 스페이스 안에서만 검색 (다른 스페이스 페이지 건드리지 않도록)
+          cql = f'space = "{space}" AND title = "{title}" AND type = "page"'
+          cql_result = confluence.cql(cql, limit=5)
+          matched = None
+          for r in (cql_result.get('results') or []):
+              content = r.get('content') or r
+              page_space = (content.get('space') or {}).get('key') or (content.get('resultGlobalContainer') or {}).get('title')
+              # 페이지의 space가 우리가 지정한 space와 일치하는 것만 채택
+              if content.get('title') == title:
+                  matched = content
+                  break
 
-          if page:
-              page_id = page['id']
+          # 안전장치: 매칭된 페이지가 정말 지정 스페이스 안에 있는지 한 번 더 검증
+          if matched:
+              verify = confluence.get_page_by_id(matched['id'], expand='space')
+              if verify.get('space', {}).get('key') != space:
+                  print(f"[Safety] Found page '{title}' (ID: {matched['id']}) but in space '{verify.get('space', {}).get('key')}', NOT '{space}'. Skipping update.")
+                  matched = None
+
+          if matched:
+              page_id = matched['id']
               confluence.update_page(
                   page_id=page_id,
                   title=title,
                   body=html_content
               )
-              print(f"[Updated] {title} (ID: {page_id})")
+              print(f"[Updated] {title} (ID: {page_id}) in space {space}")
           else:
               kwargs = dict(space=space, title=title, body=html_content)
               if parent_id:
                   kwargs['parent_id'] = parent_id
               result = confluence.create_page(**kwargs)
-              print(f"[Created] {title} (ID: {result['id']})")
+              print(f"[Created] {title} (ID: {result['id']}) in space {space}")
           EOF
