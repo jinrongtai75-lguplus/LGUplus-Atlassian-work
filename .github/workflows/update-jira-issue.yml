@@ -1,0 +1,214 @@
+name: Update Jira Issue
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Operation: create | comment | transition | update'
+        required: true
+        type: choice
+        options:
+          - create
+          - comment
+          - transition
+          - update
+      key:
+        description: 'Issue key (required for comment/transition/update). Leave blank for create.'
+        required: false
+        default: ''
+      project:
+        description: 'Project key (required for create, e.g. PROJ)'
+        required: false
+        default: ''
+      summary:
+        description: 'Summary/title (required for create)'
+        required: false
+        default: ''
+      issuetype:
+        description: 'Issue type for create (e.g. Task, Bug, Story)'
+        required: false
+        default: 'Task'
+      description:
+        description: 'Description body (plain text for create; or new value for update)'
+        required: false
+        default: ''
+      comment:
+        description: 'Comment body (for action=comment)'
+        required: false
+        default: ''
+      transition:
+        description: 'Transition name OR id (for action=transition). e.g. "Done", "In Progress", or 31'
+        required: false
+        default: ''
+      assignee:
+        description: 'Assignee accountId or email (optional for create/update)'
+        required: false
+        default: ''
+      priority:
+        description: 'Priority name (optional for create/update). e.g. High, Medium, Low'
+        required: false
+        default: ''
+      labels:
+        description: 'Comma-separated labels (optional for create/update)'
+        required: false
+        default: ''
+      fields_json:
+        description: 'JSON of arbitrary fields to set on update (advanced)'
+        required: false
+        default: ''
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install atlassian-python-api requests
+      - name: Update
+        env:
+          JIRA_BASE_URL: ${{ secrets.CONFLUENCE_BASE_URL }}
+          JIRA_EMAIL: ${{ secrets.CONFLUENCE_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.CONFLUENCE_API_TOKEN }}
+          IN_ACTION: ${{ inputs.action }}
+          IN_KEY: ${{ inputs.key }}
+          IN_PROJECT: ${{ inputs.project }}
+          IN_SUMMARY: ${{ inputs.summary }}
+          IN_TYPE: ${{ inputs.issuetype }}
+          IN_DESC: ${{ inputs.description }}
+          IN_COMMENT: ${{ inputs.comment }}
+          IN_TRANSITION: ${{ inputs.transition }}
+          IN_ASSIGNEE: ${{ inputs.assignee }}
+          IN_PRIORITY: ${{ inputs.priority }}
+          IN_LABELS: ${{ inputs.labels }}
+          IN_FIELDS_JSON: ${{ inputs.fields_json }}
+        run: |
+          python - <<'PYEOF'
+          import os, json, requests
+          from requests.auth import HTTPBasicAuth
+          from atlassian import Jira
+
+          base = os.environ['JIRA_BASE_URL'].rstrip('/').replace('/wiki', '')
+          email = os.environ['JIRA_EMAIL']
+          token = os.environ['JIRA_API_TOKEN']
+          action = os.environ['IN_ACTION'].strip().lower()
+          key = os.environ['IN_KEY'].strip()
+          jira = Jira(url=base, username=email, password=token, cloud=True)
+          auth = HTTPBasicAuth(email, token)
+
+          def to_labels(s):
+              return [x.strip() for x in s.split(',') if x.strip()]
+
+          if action == 'create':
+              project = os.environ['IN_PROJECT'].strip()
+              summary = os.environ['IN_SUMMARY'].strip()
+              if not project or not summary:
+                  print("ERROR: 'project' and 'summary' required for action=create")
+                  raise SystemExit(1)
+              fields = {
+                  'project': {'key': project},
+                  'summary': summary,
+                  'issuetype': {'name': os.environ['IN_TYPE'].strip() or 'Task'},
+              }
+              desc = os.environ['IN_DESC']
+              if desc:
+                  fields['description'] = desc
+              if os.environ['IN_PRIORITY'].strip():
+                  fields['priority'] = {'name': os.environ['IN_PRIORITY'].strip()}
+              labels = to_labels(os.environ['IN_LABELS'])
+              if labels:
+                  fields['labels'] = labels
+              if os.environ['IN_ASSIGNEE'].strip():
+                  a = os.environ['IN_ASSIGNEE'].strip()
+                  # Cloud uses accountId; allow email pass-through if it's that
+                  fields['assignee'] = {'accountId': a} if not '@' in a else {'emailAddress': a}
+              extra = os.environ['IN_FIELDS_JSON'].strip()
+              if extra:
+                  try:
+                      fields.update(json.loads(extra))
+                  except Exception as e:
+                      print(f"ERROR: invalid fields_json: {e}")
+                      raise SystemExit(1)
+
+              r = jira.issue_create(fields=fields)
+              new_key = r.get('key', '')
+              print(f"[Created] {new_key}")
+              print(f"URL: {base}/browse/{new_key}")
+
+          elif action == 'comment':
+              if not key:
+                  print("ERROR: 'key' required for action=comment")
+                  raise SystemExit(1)
+              body = os.environ['IN_COMMENT']
+              if not body:
+                  print("ERROR: 'comment' required for action=comment")
+                  raise SystemExit(1)
+              jira.issue_add_comment(key, body)
+              print(f"[Commented] {key}")
+              print(f"URL: {base}/browse/{key}")
+
+          elif action == 'transition':
+              if not key:
+                  print("ERROR: 'key' required for action=transition")
+                  raise SystemExit(1)
+              t = os.environ['IN_TRANSITION'].strip()
+              if not t:
+                  print("ERROR: 'transition' required for action=transition")
+                  raise SystemExit(1)
+              # Show available before transitioning, for safety
+              available = jira.get_issue_transitions(key)
+              print("Available transitions:")
+              for tr in available:
+                  print(f"  id={tr.get('id')}  name='{tr.get('name')}'")
+              # atlassian-python-api uses name by default
+              if t.isdigit():
+                  # by id
+                  r = requests.post(
+                      f"{base}/rest/api/2/issue/{key}/transitions",
+                      auth=auth,
+                      json={'transition': {'id': t}},
+                      headers={'Content-Type': 'application/json'},
+                  )
+                  if r.status_code >= 300:
+                      print(f"ERROR: transition by id failed: {r.status_code} {r.text}")
+                      raise SystemExit(1)
+              else:
+                  jira.issue_transition(key, t)
+              print(f"[Transitioned] {key} -> {t}")
+              print(f"URL: {base}/browse/{key}")
+
+          elif action == 'update':
+              if not key:
+                  print("ERROR: 'key' required for action=update")
+                  raise SystemExit(1)
+              update_fields = {}
+              if os.environ['IN_SUMMARY'].strip():
+                  update_fields['summary'] = os.environ['IN_SUMMARY'].strip()
+              if os.environ['IN_DESC']:
+                  update_fields['description'] = os.environ['IN_DESC']
+              if os.environ['IN_PRIORITY'].strip():
+                  update_fields['priority'] = {'name': os.environ['IN_PRIORITY'].strip()}
+              labels = to_labels(os.environ['IN_LABELS'])
+              if labels:
+                  update_fields['labels'] = labels
+              if os.environ['IN_ASSIGNEE'].strip():
+                  a = os.environ['IN_ASSIGNEE'].strip()
+                  update_fields['assignee'] = {'accountId': a} if not '@' in a else {'emailAddress': a}
+              extra = os.environ['IN_FIELDS_JSON'].strip()
+              if extra:
+                  try:
+                      update_fields.update(json.loads(extra))
+                  except Exception as e:
+                      print(f"ERROR: invalid fields_json: {e}")
+                      raise SystemExit(1)
+              if not update_fields:
+                  print("ERROR: nothing to update — set at least one of summary/description/priority/labels/assignee/fields_json")
+                  raise SystemExit(1)
+              jira.update_issue_field(key, update_fields)
+              print(f"[Updated] {key}  fields={list(update_fields.keys())}")
+              print(f"URL: {base}/browse/{key}")
+
+          else:
+              print(f"ERROR: unknown action '{action}'. Expected one of: create, comment, transition, update")
+              raise SystemExit(1)
+          PYEOF
