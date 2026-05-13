@@ -1,0 +1,182 @@
+name: Fetch Jira Issue
+
+on:
+  workflow_dispatch:
+    inputs:
+      key:
+        description: 'Issue key (e.g. PROJ-123) or full URL'
+        required: true
+      include:
+        description: 'Comma-separated: details, comments, attachments, links, transitions, history, all'
+        required: false
+        default: 'details,comments,transitions'
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install atlassian-python-api requests
+      - name: Fetch
+        env:
+          JIRA_BASE_URL: ${{ secrets.CONFLUENCE_BASE_URL }}
+          JIRA_EMAIL: ${{ secrets.CONFLUENCE_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.CONFLUENCE_API_TOKEN }}
+          IN_KEY: ${{ inputs.key }}
+          IN_INCLUDE: ${{ inputs.include }}
+        run: |
+          python - <<'PYEOF'
+          import os, re, requests
+          from requests.auth import HTTPBasicAuth
+          from atlassian import Jira
+
+          base = os.environ['JIRA_BASE_URL'].rstrip('/').replace('/wiki', '')
+          email = os.environ['JIRA_EMAIL']
+          token = os.environ['JIRA_API_TOKEN']
+          raw = os.environ['IN_KEY'].strip()
+          include = {x.strip() for x in os.environ['IN_INCLUDE'].split(',') if x.strip()}
+          if 'all' in include:
+              include = {'details', 'comments', 'attachments', 'links', 'transitions', 'history'}
+
+          # Extract issue key from URL or use as-is
+          m = re.search(r'([A-Z][A-Z0-9_]+-\d+)', raw)
+          if not m:
+              print(f"ERROR: cannot parse issue key from '{raw}'")
+              raise SystemExit(1)
+          key = m.group(1)
+
+          jira = Jira(url=base, username=email, password=token, cloud=True)
+          auth = HTTPBasicAuth(email, token)
+
+          # Fetch issue with expand
+          expand = []
+          if 'history' in include:
+              expand.append('changelog')
+          if 'links' in include:
+              expand.append('renderedFields')
+          expand_str = ','.join(expand) if expand else None
+          issue = jira.issue(key, expand=expand_str)
+          f = issue.get('fields', {}) or {}
+
+          print(f"{'='*70}")
+          print(f"DETAILS")
+          print(f"{'='*70}")
+          print(f"Key:        {issue.get('key')}")
+          print(f"Summary:    {f.get('summary','')}")
+          print(f"Status:     {((f.get('status') or {}).get('name')) or ''}")
+          print(f"Type:       {((f.get('issuetype') or {}).get('name')) or ''}")
+          print(f"Priority:   {((f.get('priority') or {}).get('name')) or ''}")
+          print(f"Reporter:   {((f.get('reporter') or {}).get('displayName')) or ''}")
+          print(f"Assignee:   {((f.get('assignee') or {}).get('displayName')) or '(unassigned)'}")
+          print(f"Created:    {f.get('created','')}")
+          print(f"Updated:    {f.get('updated','')}")
+          print(f"DueDate:    {f.get('duedate','') or '-'}")
+          labels = f.get('labels') or []
+          print(f"Labels:     {', '.join(labels) if labels else '-'}")
+          components = [(c or {}).get('name') for c in (f.get('components') or [])]
+          print(f"Components: {', '.join(components) if components else '-'}")
+          fixv = [(v or {}).get('name') for v in (f.get('fixVersions') or [])]
+          print(f"FixVersion: {', '.join(fixv) if fixv else '-'}")
+          print(f"URL:        {base}/browse/{key}")
+          desc = f.get('description') or ''
+          if isinstance(desc, dict):
+              # ADF (Atlassian Document Format) — get plain text best-effort
+              import json
+              desc = json.dumps(desc, ensure_ascii=False)[:4000]
+          print(f"\nDescription:\n{'-'*70}")
+          print(desc[:6000] if desc else '(empty)')
+
+          # Comments
+          if 'comments' in include:
+              print(f"\n{'='*70}")
+              print(f"COMMENTS")
+              print(f"{'='*70}")
+              c_list = ((f.get('comment') or {}).get('comments')) or []
+              if not c_list:
+                  # fetch via API
+                  r = requests.get(f"{base}/rest/api/2/issue/{key}/comment", auth=auth, headers={'Accept':'application/json'})
+                  if r.status_code == 200:
+                      c_list = (r.json().get('comments') or [])
+              if not c_list:
+                  print("(no comments)")
+              for c in c_list:
+                  author = ((c.get('author') or {}).get('displayName')) or ''
+                  when = c.get('created', '')
+                  body = c.get('body') or ''
+                  if isinstance(body, dict):
+                      import json
+                      body = json.dumps(body, ensure_ascii=False)[:2000]
+                  print(f"\n• [{when}] {author}")
+                  print(f"  {body[:2000]}")
+
+          # Attachments
+          if 'attachments' in include:
+              print(f"\n{'='*70}")
+              print(f"ATTACHMENTS")
+              print(f"{'='*70}")
+              a_list = f.get('attachment') or []
+              if not a_list:
+                  print("(no attachments)")
+              for a in a_list:
+                  print(f"• {a.get('filename')} ({a.get('mimeType')}, {a.get('size')}B)")
+                  print(f"  by {((a.get('author') or {}).get('displayName')) or ''} @ {a.get('created','')}")
+                  print(f"  content: {a.get('content','')}")
+
+          # Issue Links
+          if 'links' in include:
+              print(f"\n{'='*70}")
+              print(f"LINKS")
+              print(f"{'='*70}")
+              ilinks = f.get('issuelinks') or []
+              if not ilinks:
+                  print("(no links)")
+              for l in ilinks:
+                  t = ((l.get('type') or {}).get('name')) or ''
+                  if l.get('outwardIssue'):
+                      o = l['outwardIssue']
+                      print(f"• {t} (outward): {o.get('key')} — {((o.get('fields') or {}).get('summary'))}")
+                  if l.get('inwardIssue'):
+                      i = l['inwardIssue']
+                      print(f"• {t} (inward) : {i.get('key')} — {((i.get('fields') or {}).get('summary'))}")
+              # Subtasks
+              subs = f.get('subtasks') or []
+              if subs:
+                  print("\nSubtasks:")
+                  for s in subs:
+                      ff = s.get('fields') or {}
+                      print(f"  - {s.get('key')} [{((ff.get('status') or {}).get('name'))}] {ff.get('summary','')}")
+
+          # Transitions
+          if 'transitions' in include:
+              print(f"\n{'='*70}")
+              print(f"AVAILABLE TRANSITIONS")
+              print(f"{'='*70}")
+              try:
+                  ts = jira.get_issue_transitions(key)
+                  if not ts:
+                      print("(no transitions available — possibly resolved or no permission)")
+                  for t in ts:
+                      tid = t.get('id', '?')
+                      tname = t.get('name', '?')
+                      to = t.get('to', {}).get('name', '?') if isinstance(t.get('to'), dict) else '?'
+                      print(f"• id={tid}  name='{tname}'  ->  {to}")
+              except Exception as e:
+                  print(f"(failed to fetch transitions: {e})")
+
+          # History
+          if 'history' in include:
+              print(f"\n{'='*70}")
+              print(f"CHANGE HISTORY")
+              print(f"{'='*70}")
+              cl = (issue.get('changelog') or {}).get('histories') or []
+              if not cl:
+                  print("(no history)")
+              for h in cl[-20:]:  # last 20 entries
+                  author = ((h.get('author') or {}).get('displayName')) or ''
+                  when = h.get('created', '')
+                  items = h.get('items') or []
+                  for it in items:
+                      print(f"• [{when}] {author}: {it.get('field')}  '{it.get('fromString')}' -> '{it.get('toString')}'")
+          PYEOF
