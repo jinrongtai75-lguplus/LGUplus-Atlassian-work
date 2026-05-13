@@ -1,4 +1,4 @@
-# Claude Code - Atlassian confluence
+# Claude Code - Atlassian(confluence) 연동 소개
 
 사내망에서 Atlassian Cloud API가 차단되어 있어도, Claude Code에서 자연어로 Confluence를 검색/조회/업로드할 수 있게 만드는 가이드입니다.
 
