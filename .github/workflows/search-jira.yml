@@ -1,0 +1,81 @@
+name: Search Jira
+
+on:
+  workflow_dispatch:
+    inputs:
+      jql:
+        description: 'JQL query (e.g. project = PROJ AND assignee = currentUser())'
+        required: true
+      limit:
+        description: 'Max results'
+        required: false
+        default: '20'
+      fields:
+        description: 'Comma-separated fields to fetch'
+        required: false
+        default: 'summary,status,assignee,reporter,priority,issuetype,updated,labels'
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install atlassian-python-api
+      - name: Search
+        env:
+          JIRA_BASE_URL: ${{ secrets.CONFLUENCE_BASE_URL }}
+          JIRA_EMAIL: ${{ secrets.CONFLUENCE_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.CONFLUENCE_API_TOKEN }}
+          JQL: ${{ inputs.jql }}
+          LIMIT: ${{ inputs.limit }}
+          FIELDS: ${{ inputs.fields }}
+        run: |
+          python - <<'PYEOF'
+          import os
+          from atlassian import Jira
+
+          base = os.environ['JIRA_BASE_URL'].rstrip('/').replace('/wiki', '')
+          jira = Jira(
+              url=base,
+              username=os.environ['JIRA_EMAIL'],
+              password=os.environ['JIRA_API_TOKEN'],
+              cloud=True,
+          )
+          jql = os.environ['JQL']
+          limit = int(os.environ['LIMIT'])
+          fields = os.environ['FIELDS']
+
+          print(f"{'='*70}")
+          print(f"JQL: {jql}")
+          print(f"Limit: {limit}  Fields: {fields}")
+          print(f"{'='*70}\n")
+
+          result = jira.jql(jql, limit=limit, fields=fields)
+          issues = result.get('issues') or []
+          total = result.get('total', len(issues))
+          print(f"Total matches: {total}  (showing {len(issues)})\n")
+
+          if not issues:
+              print("(no results)")
+              raise SystemExit(0)
+
+          for i in issues:
+              key = i.get('key', '')
+              f = i.get('fields', {}) or {}
+              summary = f.get('summary', '')
+              status = ((f.get('status') or {}).get('name')) or ''
+              assignee = ((f.get('assignee') or {}).get('displayName')) or '(unassigned)'
+              reporter = ((f.get('reporter') or {}).get('displayName')) or ''
+              priority = ((f.get('priority') or {}).get('name')) or ''
+              itype = ((f.get('issuetype') or {}).get('name')) or ''
+              updated = f.get('updated', '') or ''
+              labels = ','.join(f.get('labels') or []) or '-'
+              print(f"• {key}  [{status}]  ({itype}, {priority})")
+              print(f"  {summary}")
+              print(f"  assignee: {assignee}  reporter: {reporter}  labels: {labels}")
+              print(f"  updated: {updated}")
+              print(f"  {base}/browse/{key}")
+              print()
+          PYEOF
